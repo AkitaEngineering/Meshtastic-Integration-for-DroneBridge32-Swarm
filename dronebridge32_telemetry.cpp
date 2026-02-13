@@ -186,6 +186,10 @@ void sendTelemetry() {
         last_signal_time = millis();
         signal_lost = false;
 
+        // If we received a special sync request (handled elsewhere) the MCU will
+        // reply via the same MESHTASTIC_SERIAL path with an encrypted ACK-like
+        // payload. (ACK sending implemented in receiveControlCommand when needed.)
+
       }
     }
   }

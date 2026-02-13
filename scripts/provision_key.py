@@ -11,6 +11,8 @@ parser = argparse.ArgumentParser()
 parser.add_argument("--hex", required=True, help="32 hex chars (16 bytes) AES key")
 parser.add_argument("--file", help="Write key to file")
 parser.add_argument("--keyring", action="store_true", help="Save key to system keyring (if available)")
+parser.add_argument("--sign-pem", help="Sign the key using this ECDSA private PEM and print SETKEYSIG string")
+parser.add_argument("--serial", help="Send provisioning line directly to MCU serial port (e.g. COM3 or /dev/ttyUSB0)")
 args = parser.parse_args()
 hexs = args.hex.strip()
 if len(hexs) != 32:
@@ -25,5 +27,28 @@ if args.file:
 if args.keyring:
     ok = save_key_to_keyring(key)
     print(f"Saved to keyring: {ok}")
-if not args.file and not args.keyring:
-    print("No destination specified; use --file or --keyring")
+
+# signing/provisioning
+if args.sign_pem:
+    from cryptography.hazmat.primitives import hashes
+    from cryptography.hazmat.primitives.asymmetric import ec
+    from cryptography.hazmat.primitives import serialization
+    from cryptography.hazmat.primitives.asymmetric.utils import encode_dss_signature
+    from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+    priv_pem = open(args.sign_pem, "rb").read()
+    priv = load_pem_private_key(priv_pem, password=None)
+    sig = priv.sign(bytes.fromhex(hexs), ec.ECDSA(hashes.SHA256()))
+    # sig is DER-encoded. Send as hex
+    sighex = sig.hex()
+    sets = f"SETKEYSIG:{hexs}:{sighex}"
+    print(sets)
+    if args.serial:
+        import serial, time
+        s = serial.Serial(args.serial, 115200, timeout=1)
+        s.write((sets + "\n").encode())
+        time.sleep(0.1)
+        print(s.read_all().decode(errors='ignore'))
+
+if not args.file and not args.keyring and not args.sign_pem:
+    print("No destination specified; use --file, --keyring, or --sign-pem")

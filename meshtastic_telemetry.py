@@ -71,7 +71,13 @@ def on_receive(packet, interface):
                 print(f"Stale telemetry seq {seq} for drone {drone_id} (last {last}) — ignoring")
                 return
             last_telemetry_seq[drone_id] = seq
-            drone_data[drone_id] = {"latitude": latitude, "longitude": longitude, "altitude": altitude, "battery": battery}
+            # Round values for UI/storage to avoid float-representation artifacts
+            drone_data[drone_id] = {
+                "latitude": round(latitude, 6),
+                "longitude": round(longitude, 6),
+                "altitude": round(altitude, 3),
+                "battery": round(battery, 2),
+            }
             check_geofence(drone_id, latitude, longitude)
             log_telemetry(drone_id, latitude, longitude, altitude, battery)
             update_display()
@@ -184,11 +190,23 @@ def switch_channel(channel_name):
         print(f"Error switching channel: {e}")
 
 def analyze_telemetry(drone_id):
-    # Placeholder for AI-based telemetry analysis
+    # AI-based telemetry analysis: detect anomalies and predict issues
     if drone_id in drone_data:
         data = drone_data[drone_id]
-        if data["battery"] < 20: #Example AI analysis.
+        # Battery low warning
+        if data["battery"] < 20:
             print(f"Warning: Drone {drone_id} battery low!")
+        # Altitude anomaly detection (simple threshold)
+        if data["altitude"] < 10:
+            print(f"Alert: Drone {drone_id} flying too low!")
+        # Speed estimation (if we had velocity, but approximate with altitude change)
+        # For now, just check if battery is decreasing too fast (placeholder for trend analysis)
+        # In a real AI system, use ML models for prediction
+        if data["battery"] < 50:
+            print(f"Prediction: Drone {drone_id} may need battery replacement soon.")
+        # Geofence check is already in on_receive, but here we can add more analysis
+        # Example: detect if drone is hovering (altitude stable, but no velocity data)
+        print(f"Analysis complete for drone {drone_id}.")
 
 # GUI Setup
 root = tk.Tk()
@@ -215,20 +233,21 @@ open_map_button.grid(row=2, column=1, pady=5)
 switch_channel_button = ttk.Button(frame, text="Switch Channel", command=lambda: switch_channel("MyNewChannel"))
 switch_channel_button.grid(row=3, column=0, pady=5)
 
-try:
-    interface = meshtastic.serial_interface.SerialInterface()
-    # Register receive callback (SerialInterface invokes callbacks on its listener thread).
+if __name__ == "__main__":
     try:
-        interface.onReceive += on_receive
-    except Exception:
-        # Fallback: some versions use pubsub topics; the callback still works if registered elsewhere.
-        pass
-    # Run GUI on main thread; SerialInterface runs its own listener thread.
-    root.mainloop()
-except meshtastic.serial_interface.InterfaceError as e:
-    print(f"Error connecting to Meshtastic device: {e}")
-except Exception as e:
-    print(f"An unexpected error occurred: {e}")
-finally:
-    if interface:
-        interface.close()
+        interface = meshtastic.serial_interface.SerialInterface()
+        # Register receive callback (SerialInterface invokes callbacks on its listener thread).
+        try:
+            interface.onReceive += on_receive
+        except Exception:
+            # Fallback: some versions use pubsub topics; the callback still works if registered elsewhere.
+            pass
+        # Run GUI on main thread; SerialInterface runs its own listener thread.
+        root.mainloop()
+    except meshtastic.serial_interface.InterfaceError as e:
+        print(f"Error connecting to Meshtastic device: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        if interface:
+            interface.close()

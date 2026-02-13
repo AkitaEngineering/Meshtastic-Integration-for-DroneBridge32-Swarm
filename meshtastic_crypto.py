@@ -5,6 +5,10 @@ Utility helpers for AES key loading, sequence persistence and plaintext packing
 import os
 import struct
 
+# Default AES-128 test key (example). Use secure provisioning in production.
+DEFAULT_KEY = bytes([0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+                   0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C])
+
 try:
     import keyring
 except Exception:

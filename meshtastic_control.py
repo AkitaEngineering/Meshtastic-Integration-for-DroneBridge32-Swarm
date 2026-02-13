@@ -16,7 +16,16 @@ from meshtastic_crypto import load_key, next_seq as crypto_next_seq
 KEY = load_key(DEFAULT_KEY)
 
 DRONE_CONTROL_COMMAND_DATA_TYPE = 101
+CONTROL_ACK_DATA_TYPE = 102
 interface = None
+
+# ack tracking
+import threading
+_pending_acks = {}
+_pending_acks_lock = threading.Lock()
+_pending_sync_events = {}
+_last_sync_result = {}
+
 # delegate sequence handling to meshtastic_crypto for testability
 SEQ_FILE = ".control_seq"
 
@@ -32,11 +41,11 @@ def next_seq(seq_file: str = SEQ_FILE):
     from meshtastic_crypto import next_seq as crypto_next_seq
     return crypto_next_seq(seq_file)
 
-def send_control_command(drone_id, command):
+def send_control_command(drone_id, command, wait_for_ack=False, timeout=1.0):
     global interface
     if interface is None:
         print("Meshtastic interface not connected")
-        return
+        return False
     try:
         seq = next_seq()
         # use helper pack to ensure format consistency with MCU
@@ -44,14 +53,100 @@ def send_control_command(drone_id, command):
         payload = pack_control_plaintext(seq, int(drone_id), int(command))
         if AESGCM is None:
             print("cryptography package required for AES-GCM encryption")
-            return
+            return False
         aesgcm = AESGCM(KEY)
         nonce = os.urandom(12)
         ciphertext = aesgcm.encrypt(nonce, payload, None)  # ciphertext || tag
         wire = nonce + ciphertext
+
+        # subscribe for ACKs once (lazy)
+        try:
+            interface.onReceive += _on_receive_control
+        except Exception:
+            pass
+
+        if wait_for_ack:
+            ev = threading.Event()
+            with _pending_acks_lock:
+                _pending_acks[seq] = ev
+
         interface.sendData(wire, DRONE_CONTROL_COMMAND_DATA_TYPE)
+
+        if wait_for_ack:
+            ok = ev.wait(timeout)
+            with _pending_acks_lock:
+                _pending_acks.pop(seq, None)
+            return ok
+        return True
     except Exception as e:
         print(f"Failed to send control command: {e}")
+        return False
+
+
+def request_seq_sync(drone_id, timeout=1.0):
+    """Send a sync-request to a drone and wait for its sync-response.
+
+    The sync request uses command value 0x7FFFFFFF (special) and the MCU
+    replies with an ACK whose status==2 containing its last sequence.
+    Returns the reported last sequence (int) on success, or None on timeout/failure.
+    """
+    # prepare waiting event keyed by drone_id
+    ev = threading.Event()
+    with _pending_acks_lock:
+        _pending_sync_events[drone_id] = ev
+    try:
+        sent = send_control_command(drone_id, 0x7FFFFFFF, wait_for_ack=False)
+        if not sent:
+            with _pending_acks_lock:
+                _pending_sync_events.pop(drone_id, None)
+            return None
+
+        got = ev.wait(timeout)
+        with _pending_acks_lock:
+            _pending_sync_events.pop(drone_id, None)
+        if not got:
+            return None
+        # return the last sync result recorded by the receive handler
+        return _last_sync_result.get(drone_id)
+    except Exception:
+        with _pending_acks_lock:
+            _pending_sync_events.pop(drone_id, None)
+        return None
+
+
+def _on_receive_control(packet, iface):
+    # handle ACKs coming back from the drone; decrypt and set pending event
+    try:
+        if packet.get('decoded', {}).get('data', {}).get('portnum') is None:
+            return
+        payload = packet['decoded']['data']['payload']
+        # decrypt payload using AES-GCM
+        if AESGCM is None:
+            return
+        try:
+            plaintext = AESGCM(KEY).decrypt(payload[:12], payload[12:], None)
+        except Exception:
+            return
+        # ack format: uint32_t seq | uint8_t drone_id | uint8_t status
+        if len(plaintext) == 6:
+            seq, drone_id, status = struct.unpack('<IBB', plaintext)
+            # persist acknowledged seq
+            save_seq(seq)
+            if status == 2:
+                # sync-response -> notify waiting sync caller
+                ev = None
+                with _pending_acks_lock:
+                    ev = _pending_sync_events.get(drone_id)
+                if ev:
+                    _last_sync_result[drone_id] = seq
+                    ev.set()
+            else:
+                with _pending_acks_lock:
+                    ev = _pending_acks.get(seq)
+                    if ev:
+                        ev.set()
+    except Exception:
+        pass
 
 def send_return_home():
     try:
@@ -138,14 +233,15 @@ swarm_land_button.grid(row=7, column=0, pady=5, columnspan=2, sticky=tk.W + tk.E
 switch_channel_button = ttk.Button(frame, text="Switch Channel", command=lambda: switch_channel("MyNewChannel"))
 switch_channel_button.grid(row=8, column=0, pady=5, columnspan=2, sticky=tk.W + tk.E)
 
-try:
-    interface = meshtastic.serial_interface.SerialInterface()
-    root.mainloop()
+if __name__ == "__main__":
+    try:
+        interface = meshtastic.serial_interface.SerialInterface()
+        root.mainloop()
 
-except meshtastic.serial_interface.InterfaceError as e:
-    print(f"Error connecting to Meshtastic device: {e}")
-except Exception as e:
-    print(f"An unexpected error occurred: {e}")
-finally:
-    if interface:
-        interface.close()
+    except meshtastic.serial_interface.InterfaceError as e:
+        print(f"Error connecting to Meshtastic device: {e}")
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+    finally:
+        if interface:
+            interface.close()

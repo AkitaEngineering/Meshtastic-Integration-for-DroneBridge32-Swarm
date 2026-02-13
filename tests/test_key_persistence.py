@@ -1,6 +1,7 @@
 import os
 import importlib
 import tempfile
+import sys
 
 import meshtastic_crypto as mc
 
@@ -29,7 +30,7 @@ def test_save_key_to_keyring_monkeypatch(monkeypatch):
         @staticmethod
         def get_password(svc, name):
             return DummyKR.store.get((svc, name))
-    monkeypatch.setitem('sys.modules', 'keyring', DummyKR)
+    monkeypatch.setitem(sys.modules, 'keyring', DummyKR)
     # reload module to pick up keyring
     importlib.reload(mc)
     assert mc.save_key_to_keyring(key) is True

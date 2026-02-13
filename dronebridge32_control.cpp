@@ -24,6 +24,8 @@ static const uint8_t kKey[] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0
 static const size_t kKeyLen = sizeof(kKey);
 static uint8_t runtime_key[16];
 
+#include "provisioning_pubkey.h"
+
 #if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
 #include <Preferences.h>
 static Preferences prefs;
@@ -82,6 +84,26 @@ static bool aes_gcm_decrypt_runtime(const uint8_t* nonce, size_t nonce_len,
   return (rc == 0);
 }
 
+static void fill_random_bytes(uint8_t* buf, size_t len) {
+#if defined(ESP32) || defined(ARDUINO_ARCH_ESP32)
+  esp_fill_random(buf, len);
+#else
+  for (size_t i = 0; i < len; ++i) buf[i] = (uint8_t)random(0, 256);
+#endif
+}
+
+static bool aes_gcm_encrypt_runtime(const uint8_t* plaintext, size_t plen,
+                            const uint8_t* nonce, size_t nonce_len,
+                            uint8_t* ciphertext_out, uint8_t* tag_out, size_t tag_len) {
+  mbedtls_gcm_context gcm;
+  mbedtls_gcm_init(&gcm);
+  int rc = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, runtime_key, (int)(kKeyLen * 8));
+  if (rc != 0) { mbedtls_gcm_free(&gcm); return false; }
+  rc = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, (size_t)plen, nonce, nonce_len, NULL, 0, plaintext, ciphertext_out, tag_len, tag_out);
+  mbedtls_gcm_free(&gcm);
+  return (rc == 0);
+}
+
 void setup() {
   MESHTASTIC_SERIAL.begin(BAUD_RATE);
   MAVLINK_SERIAL.begin(57600);
@@ -118,11 +140,43 @@ void receiveControlCommand() {
     // replay protection: require strictly increasing sequence numbers
     if (seq <= last_control_seq) {
       Serial.println("Rejected control (replay or stale seq)");
+      // send ACK with status=1 (rejected)
+      uint32_t ack_seq = seq;
+      uint8_t ackbuf[6];
+      memcpy(ackbuf, &ack_seq, sizeof(ack_seq));
+      ackbuf[4] = droneID;
+      ackbuf[5] = 1; // rejected
+      const size_t nonce_len = 12, tag_len = 16;
+      uint8_t nonce[nonce_len]; fill_random_bytes(nonce, nonce_len);
+      uint8_t ciphertext[sizeof(ackbuf)], tag[tag_len];
+      if (aes_gcm_encrypt_runtime(ackbuf, sizeof(ackbuf), nonce, nonce_len, ciphertext, tag, tag_len)) {
+        MESHTASTIC_SERIAL.write(nonce, nonce_len);
+        MESHTASTIC_SERIAL.write(ciphertext, sizeof(ciphertext));
+        MESHTASTIC_SERIAL.write(tag, tag_len);
+      }
       return;
     }
 
     // Accept and persist sequence
     store_last_control_seq(seq);
+
+    // Support special sync-request command: 0x7fffffff -> respond with last_control_seq
+    if (command == 0x7FFFFFFF) {
+      uint32_t ack_seq = last_control_seq;
+      uint8_t ackbuf[6];
+      memcpy(ackbuf, &ack_seq, sizeof(ack_seq));
+      ackbuf[4] = droneID;
+      ackbuf[5] = 2; // sync-response
+      const size_t nonce_len = 12, tag_len = 16;
+      uint8_t nonce[nonce_len]; fill_random_bytes(nonce, nonce_len);
+      uint8_t ciphertext[sizeof(ackbuf)], tag[tag_len];
+      if (aes_gcm_encrypt_runtime(ackbuf, sizeof(ackbuf), nonce, nonce_len, ciphertext, tag, tag_len)) {
+        MESHTASTIC_SERIAL.write(nonce, nonce_len);
+        MESHTASTIC_SERIAL.write(ciphertext, sizeof(ciphertext));
+        MESHTASTIC_SERIAL.write(tag, tag_len);
+      }
+      return;
+    }
 
     if (droneID == DRONE_ID) {
       if (command == 1) {
@@ -137,6 +191,20 @@ void receiveControlCommand() {
       } else {
         Serial.println("-> Unknown command");
       }
+      // send ACK (status=0)
+      uint32_t ack_seq = seq;
+      uint8_t ackbuf[6];
+      memcpy(ackbuf, &ack_seq, sizeof(ack_seq));
+      ackbuf[4] = droneID;
+      ackbuf[5] = 0; // ok
+      const size_t nonce_len = 12, tag_len = 16;
+      uint8_t nonce[nonce_len]; fill_random_bytes(nonce, nonce_len);
+      uint8_t ciphertext[sizeof(ackbuf)], tag[tag_len];
+      if (aes_gcm_encrypt_runtime(ackbuf, sizeof(ackbuf), nonce, nonce_len, ciphertext, tag, tag_len)) {
+        MESHTASTIC_SERIAL.write(nonce, nonce_len);
+        MESHTASTIC_SERIAL.write(ciphertext, sizeof(ciphertext));
+        MESHTASTIC_SERIAL.write(tag, tag_len);
+      }
     }
   }
 
@@ -144,7 +212,65 @@ void receiveControlCommand() {
   if (Serial.available()) {
     String line = Serial.readStringUntil('\n');
     line.trim();
-    if (line.startsWith("SETKEY:")) {
+    if (line.startsWith("SETKEYSIG:")) {
+      // format: SETKEYSIG:hexkey:dersighex
+      int p1 = line.indexOf(':', 8); // after SETKEYSIG:
+      if (p1 > 0) {
+        String hex = line.substring(8, p1);
+        String sighex = line.substring(p1 + 1);
+        hex.trim(); sighex.trim();
+        if (hex.length() == (int)(kKeyLen * 2) && sighex.length() > 0) {
+          // convert hex to bytes
+          uint8_t newkey[kKeyLen];
+          bool ok = true;
+          for (size_t i = 0; i < kKeyLen; ++i) {
+            int hi = (int)strtol(hex.substring(i*2, i*2+1).c_str(), NULL, 16);
+            int lo = (int)strtol(hex.substring(i*2+1, i*2+2).c_str(), NULL, 16);
+            if (hi < 0 || lo < 0) { ok = false; break; }
+            newkey[i] = (uint8_t)((hi << 4) | lo);
+          }
+          if (!ok) { Serial.println("SETKEYSIG: invalid hex"); }
+          else {
+            // convert signature hex
+            size_t siglen = sighex.length() / 2;
+            uint8_t sigbuf[256];
+            if (siglen > sizeof(sigbuf)) { Serial.println("SETKEYSIG: signature too long"); }
+            else {
+              for (size_t i = 0; i < siglen; ++i) {
+                int hi = (int)strtol(sighex.substring(i*2, i*2+1).c_str(), NULL, 16);
+                int lo = (int)strtol(sighex.substring(i*2+1, i*2+2).c_str(), NULL, 16);
+                sigbuf[i] = (uint8_t)((hi << 4) | lo);
+              }
+              // verify signature using compiled provisioning public key
+              mbedtls_pk_context pk;
+              mbedtls_pk_init(&pk);
+              const char *pem = PROVISIONING_PUBKEY_PEM;
+              int ret = mbedtls_pk_parse_public_key(&pk, (const unsigned char*)pem, strlen(pem)+1);
+              if (ret != 0) {
+                Serial.println("SETKEYSIG: failed to parse provisioning pubkey");
+              } else {
+                // verify SHA256 over the key bytes (hex decoded)
+                unsigned char hash[32];
+                mbedtls_md(mbedtls_md_info_from_type(MBEDTLS_MD_SHA256), newkey, kKeyLen, hash);
+                ret = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash), sigbuf, siglen);
+                if (ret == 0) {
+                  memcpy(runtime_key, newkey, kKeyLen);
+                  store_runtime_key(runtime_key, kKeyLen);
+                  Serial.println("SETKEYSIG: signature verified, key stored");
+                } else {
+                  Serial.println("SETKEYSIG: signature verification failed");
+                }
+              }
+              mbedtls_pk_free(&pk);
+            }
+          }
+        } else {
+          Serial.println("SETKEYSIG: invalid lengths");
+        }
+      } else {
+        Serial.println("SETKEYSIG: bad format");
+      }
+    } else if (line.startsWith("SETKEY:")) {
       String hex = line.substring(strlen("SETKEY:"));
       hex.trim();
       if (hex.length() == (int)(kKeyLen * 2)) {
