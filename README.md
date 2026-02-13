@@ -45,7 +45,7 @@ This project provides a comprehensive framework for integrating Meshtastic mesh 
     * Connect a Meshtastic-compatible device to your drone.
     * Configure the network settings.
 3.  **Meshtastic Plugin:**
-    * Install Python and required libraries (`pip install meshtastic folium`).
+    * Install Python and required libraries (`pip install meshtastic folium cryptography`).
     * Run the plugin scripts (`python meshtastic_telemetry.py` and `python meshtastic_control.py`).
 
 ## Usage
@@ -61,7 +61,8 @@ This project provides a comprehensive framework for integrating Meshtastic mesh 
 * **MAVLink Settings:** Configure MAVLink baud rate and message IDs.
 * **Meshtastic Settings:** Configure channel, encryption keys, and network settings.
 * **Geofence:** Modify the geofence coordinates in the telemetry plugin.
-* **Encryption Key:** Modify the Encryption keys in the arduino code and ensure they match.
+* **Encryption Key:** The AES key is no longer hard-coded for Python — set `MESHTASTIC_AES_KEY` (hex) or edit the `KEY` constant in the Python scripts. On the MCU you can provision a runtime key via the USB serial console: send a line `SETKEY:<32-hex-chars>` to persist the key (ESP32 NVS) or use the compiled default. Ensure keys match between ground and drone.
+* **Replay protection:** Messages include a 32-bit sequence number and receivers reject stale/replayed packets. Sequence numbers are persisted for control on the drone (if supported) and for the ground control app stored locally in `.control_seq`. Replace with a secure counter sync if needed for distributed systems.
 
 ## Disclaimer
 

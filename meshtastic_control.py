@@ -3,13 +3,67 @@ import meshtastic.serial_interface
 import struct
 import tkinter as tk
 from tkinter import ttk
+import os
+try:
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    AESGCM = None
+
+# AES-128 key (example). Must match the drone-side key.
+KEY = bytes([0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C])
+# Override key from environment (hex) when provided
+env = os.environ.get("MESHTASTIC_AES_KEY")
+if env:
+    try:
+        k = bytes.fromhex(env)
+        if len(k) == 16:
+            KEY = k
+        else:
+            print("MESHTASTIC_AES_KEY must be 32 hex chars (16 bytes); using default key")
+    except Exception as e:
+        print(f"Invalid MESHTASTIC_AES_KEY: {e}; using default key")
 
 DRONE_CONTROL_COMMAND_DATA_TYPE = 101
 interface = None
+SEQ_FILE = ".control_seq"
+
+def load_seq():
+    try:
+        with open(SEQ_FILE, "r") as f:
+            return int(f.read().strip())
+    except Exception:
+        return 0
+
+def save_seq(seq):
+    try:
+        with open(SEQ_FILE, "w") as f:
+            f.write(str(seq))
+    except Exception as e:
+        print(f"Warning: failed to persist seq: {e}")
+
+def next_seq():
+    s = load_seq() + 1
+    save_seq(s)
+    return s
 
 def send_control_command(drone_id, command):
-    payload = struct.pack("Bi", drone_id, command)
-    interface.sendData(payload, DRONE_CONTROL_COMMAND_DATA_TYPE)
+    global interface
+    if interface is None:
+        print("Meshtastic interface not connected")
+        return
+    try:
+        seq = next_seq()
+        payload = struct.pack("<IBi", int(seq), int(drone_id), int(command))
+        if AESGCM is None:
+            print("cryptography package required for AES-GCM encryption")
+            return
+        aesgcm = AESGCM(KEY)
+        nonce = os.urandom(12)
+        ciphertext = aesgcm.encrypt(nonce, payload, None)  # ciphertext || tag
+        wire = nonce + ciphertext
+        interface.sendData(wire, DRONE_CONTROL_COMMAND_DATA_TYPE)
+    except Exception as e:
+        print(f"Failed to send control command: {e}")
 
 def send_return_home():
     try:
