@@ -14,19 +14,10 @@ try:
 except ImportError:
     AESGCM = None
 
-# AES-128 key (example). Must match the drone-side key.
-KEY = bytes([0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C])
-# Override key from environment (hex) when provided
-env = os.environ.get("MESHTASTIC_AES_KEY")
-if env:
-    try:
-        k = bytes.fromhex(env)
-        if len(k) == 16:
-            KEY = k
-        else:
-            print("MESHTASTIC_AES_KEY must be 32 hex chars (16 bytes); using default key")
-    except Exception as e:
-        print(f"Invalid MESHTASTIC_AES_KEY: {e}; using default key")
+# AES-128 default key (example). Must match the drone-side key if not overridden.
+DEFAULT_KEY = bytes([0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C])
+from meshtastic_crypto import load_key, next_seq as crypto_next_seq
+KEY = load_key(DEFAULT_KEY)
 
 DRONE_TELEMETRY_DATA_TYPE = 100
 DRONE_CONTROL_COMMAND_DATA_TYPE = 101
@@ -44,24 +35,17 @@ map_file = "drone_map.html"
 map_obj = folium.Map(location=[40.7128, -74.0060], zoom_start=14)  # Initialize map
 SEQ_FILE = ".control_seq"
 
-def load_seq():
-    try:
-        with open(SEQ_FILE, "r") as f:
-            return int(f.read().strip())
-    except Exception:
-        return 0
+def load_seq(seq_file: str = SEQ_FILE):
+    from meshtastic_crypto import load_seq as crypto_load_seq
+    return crypto_load_seq(seq_file)
 
-def save_seq(seq):
-    try:
-        with open(SEQ_FILE, "w") as f:
-            f.write(str(seq))
-    except Exception as e:
-        print(f"Warning: failed to persist seq: {e}")
+def save_seq(seq, seq_file: str = SEQ_FILE):
+    from meshtastic_crypto import save_seq as crypto_save_seq
+    return crypto_save_seq(seq, seq_file)
 
-def next_seq():
-    s = load_seq() + 1
-    save_seq(s)
-    return s
+def next_seq(seq_file: str = SEQ_FILE):
+    from meshtastic_crypto import next_seq as crypto_next_seq
+    return crypto_next_seq(seq_file)
 
 def on_receive(packet, interface):
     if packet['decoded']['data']['portnum'] == DRONE_TELEMETRY_DATA_TYPE:

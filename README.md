@@ -61,8 +61,14 @@ This project provides a comprehensive framework for integrating Meshtastic mesh 
 * **MAVLink Settings:** Configure MAVLink baud rate and message IDs.
 * **Meshtastic Settings:** Configure channel, encryption keys, and network settings.
 * **Geofence:** Modify the geofence coordinates in the telemetry plugin.
-* **Encryption Key:** The AES key is no longer hard-coded for Python — set `MESHTASTIC_AES_KEY` (hex) or edit the `KEY` constant in the Python scripts. On the MCU you can provision a runtime key via the USB serial console: send a line `SETKEY:<32-hex-chars>` to persist the key (ESP32 NVS) or use the compiled default. Ensure keys match between ground and drone.
+* **Encryption Key:** The AES key can be provided in multiple ways (priority):
+  - `MESHTASTIC_AES_KEY_FILE` — path to a file containing 32 hex chars (recommended for local deployments)
+  - `MESHTASTIC_AES_KEY` — environment variable with 32 hex chars
+  - system keyring (optional)
+  - compiled default key (fallback)
+  On the MCU you can provision a runtime key via the USB serial console: send `SETKEY:<32-hex-chars>` to persist the key to NVS (ESP32). Ensure keys match between ground and drone.
 * **Replay protection:** Messages include a 32-bit sequence number and receivers reject stale/replayed packets. Sequence numbers are persisted for control on the drone (if supported) and for the ground control app stored locally in `.control_seq`. Replace with a secure counter sync if needed for distributed systems.
+* **Testing & CI:** This repository includes unit tests (`tests/test_crypto.py`) and a GitHub Actions CI workflow at `.github/workflows/ci.yml` that runs tests on push/pull requests.
 
 ## Disclaimer
 
