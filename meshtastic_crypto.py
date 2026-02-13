@@ -77,6 +77,26 @@ def next_seq(seq_file: str = ".control_seq") -> int:
     return s
 
 
+# Key persistence helpers
+def save_key_to_file(key: bytes, path: str) -> bool:
+    try:
+        with open(path, "w") as f:
+            f.write(key.hex())
+        return True
+    except Exception:
+        return False
+
+
+def save_key_to_keyring(key: bytes) -> bool:
+    if keyring is None:
+        return False
+    try:
+        keyring.set_password("meshtastic", "aes_key", key.hex())
+        return True
+    except Exception:
+        return False
+
+
 # Plaintext packing/unpacking helpers
 def pack_control_plaintext(seq: int, drone_id: int, command: int) -> bytes:
     return struct.pack("<IBi", int(seq), int(drone_id), int(command))
