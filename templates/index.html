@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Drone Swarm GCS</title>
+    <!-- Fonts -->
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600;700&display=swap" rel="stylesheet">
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+    
+    <style>
+        :root {
+            --bg-color: #0b0f19;
+            --glass-bg: rgba(20, 25, 40, 0.6);
+            --glass-border: rgba(255, 255, 255, 0.08);
+            --accent: #3b82f6;
+            --accent-hover: #2563eb;
+            --danger: #ef4444;
+            --danger-hover: #dc2626;
+            --success: #10b981;
+            --text-main: #f8fafc;
+            --text-muted: #94a3b8;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: 'Inter', sans-serif;
+            background-color: var(--bg-color);
+            background-image: 
+                radial-gradient(circle at 15% 50%, rgba(59, 130, 246, 0.15), transparent 25%),
+                radial-gradient(circle at 85% 30%, rgba(16, 185, 129, 0.15), transparent 25%);
+            color: var(--text-main);
+            height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 1.5rem 2rem;
+            background: var(--glass-bg);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid var(--glass-border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: 1.5rem;
+            font-weight: 700;
+            letter-spacing: 1px;
+            text-transform: uppercase;
+        }
+
+        .status-dot {
+            height: 10px;
+            width: 10px;
+            background-color: var(--success);
+            border-radius: 50%;
+            display: inline-block;
+            box-shadow: 0 0 10px var(--success);
+        }
+
+        .main-container {
+            display: flex;
+            flex: 1;
+            overflow: hidden;
+            padding: 1rem;
+            gap: 1rem;
+        }
+
+        .panel {
+            background: var(--glass-bg);
+            backdrop-filter: blur(16px);
+            border: 1px solid var(--glass-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 8px 32px rgba(0, 0, 0, 0.3);
+        }
+
+        .left-panel {
+            flex: 0 0 350px;
+            overflow-y: auto;
+        }
+
+        .right-panel {
+            flex: 1;
+            position: relative;
+            overflow: hidden;
+            padding: 0; /* Map fills panel */
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
+            border-radius: 16px;
+            background-color: #1a1a2e; /* dark fallback */
+        }
+
+        h2 {
+            font-size: 1.1rem;
+            margin-top: 0;
+            margin-bottom: 1rem;
+            color: var(--text-muted);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .drone-card {
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--glass-border);
+            border-radius: 12px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            transition: transform 0.2s ease, background 0.2s ease;
+        }
+
+        .drone-card:hover {
+            background: rgba(255, 255, 255, 0.05);
+            transform: translateY(-2px);
+        }
+
+        .drone-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.8rem;
+            border-bottom: 1px solid rgba(255,255,255,0.1);
+            padding-bottom: 0.5rem;
+        }
+
+        .drone-id {
+            font-weight: 700;
+            font-size: 1.2rem;
+            color: var(--accent);
+        }
+
+        .telemetry-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.8rem;
+            font-size: 0.9rem;
+        }
+
+        .data-label {
+            color: var(--text-muted);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+        }
+
+        .data-value {
+            font-weight: 600;
+            color: #fff;
+        }
+
+        .controls {
+            margin-top: 1rem;
+            display: flex;
+            gap: 0.5rem;
+        }
+
+        button {
+            flex: 1;
+            padding: 0.6rem;
+            border: none;
+            border-radius: 8px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            color: white;
+            font-family: 'Inter', sans-serif;
+            text-transform: uppercase;
+            font-size: 0.8rem;
+            letter-spacing: 0.5px;
+        }
+
+        .btn-rtl {
+            background-color: var(--accent);
+        }
+        .btn-rtl:hover { background-color: var(--accent-hover); }
+
+        .btn-land {
+            background-color: rgba(255, 255, 255, 0.1);
+            border: 1px solid rgba(255,255,255,0.2);
+        }
+        .btn-land:hover { background-color: rgba(255, 255, 255, 0.15); }
+
+        .btn-danger {
+            background-color: var(--danger);
+        }
+        .btn-danger:hover { background-color: var(--danger-hover); box-shadow: 0 0 15px rgba(239,68,68,0.4); }
+
+        .swarm-controls {
+            margin-top: 2rem;
+            border-top: 1px solid var(--glass-border);
+            padding-top: 1rem;
+        }
+
+        /* Custom Scrollbar */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+        ::-webkit-scrollbar-track {
+            background: transparent;
+        }
+        ::-webkit-scrollbar-thumb {
+            background: rgba(255, 255, 255, 0.1);
+            border-radius: 10px;
+        }
+        ::-webkit-scrollbar-thumb:hover {
+            background: rgba(255, 255, 255, 0.2);
+        }
+        
+        /* Leaflet Dark mode overrides */
+        .leaflet-layer,
+        .leaflet-control-zoom-in,
+        .leaflet-control-zoom-out,
+        .leaflet-control-attribution {
+            filter: invert(100%) hue-rotate(180deg) brightness(95%) contrast(90%);
+        }
+        .leaflet-container {
+            background: #000;
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Meshtastic Swarm Control</h1>
+        <div style="display: flex; align-items: center; gap: 8px; font-weight: 600;">
+            <span class="status-dot"></span>
+            SYSTEM ONLINE
+        </div>
+    </header>
+
+    <div class="main-container">
+        <!-- Left Panel: Telemetry & Controls -->
+        <div class="panel left-panel">
+            <h2>Active Nodes</h2>
+            <div id="drones-container">
+                <!-- Drone cards injected via JS -->
+                <p style="color: var(--text-muted); text-align: center; margin-top: 2rem;">Waiting for telemetry...</p>
+            </div>
+
+            <div class="swarm-controls">
+                <h2>Swarm Commands</h2>
+                <div style="display: flex; gap: 0.5rem; flex-direction: column;">
+                    <button class="btn-rtl" onclick="sendSwarmCommand(1)">Return All Home</button>
+                    <button class="btn-land" onclick="sendSwarmCommand(2)">Land All</button>
+                    <button class="btn-danger" onclick="sendSwarmCommand(3)">Emergency Stop All</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- Right Panel: Map -->
+        <div class="panel right-panel">
+            <div id="map"></div>
+        </div>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script>
+        // Initialize Map
+        const map = L.map('map').setView([40.7128, -74.0060], 13);
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap contributors'
+        }).addTo(map);
+
+        const droneMarkers = {};
+        let mapCentered = false;
+
+        function sendCommand(droneId, command) {
+            fetch('/api/control', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({drone_id: droneId, command: command})
+            }).then(r => r.json()).then(data => {
+                console.log("Command sent", data);
+            }).catch(err => console.error(err));
+        }
+
+        function sendSwarmCommand(command) {
+            // Send to broadcast ID 255 or individual drones
+            sendCommand(255, command);
+        }
+
+        function createDroneCard(id, data) {
+            const card = document.createElement('div');
+            card.className = 'drone-card';
+            card.id = `drone-card-${id}`;
+            card.innerHTML = `
+                <div class="drone-header">
+                    <div class="drone-id">Drone #${id}</div>
+                    <div style="color: ${data.battery < 11.0 ? 'var(--danger)' : 'var(--success)'}">
+                        ${data.battery}V
+                    </div>
+                </div>
+                <div class="telemetry-grid">
+                    <div>
+                        <div class="data-label">Altitude</div>
+                        <div class="data-value">${data.altitude}m</div>
+                    </div>
+                    <div>
+                        <div class="data-label">Attitude</div>
+                        <div class="data-value">R:${data.roll.toFixed(1)} P:${data.pitch.toFixed(1)}</div>
+                    </div>
+                    <div>
+                        <div class="data-label">Lat</div>
+                        <div class="data-value">${data.latitude.toFixed(5)}</div>
+                    </div>
+                    <div>
+                        <div class="data-label">Lon</div>
+                        <div class="data-value">${data.longitude.toFixed(5)}</div>
+                    </div>
+                </div>
+                <div class="controls">
+                    <button class="btn-rtl" onclick="sendCommand(${id}, 1)">RTL</button>
+                    <button class="btn-land" onclick="sendCommand(${id}, 2)">Land</button>
+                </div>
+            `;
+            return card;
+        }
+
+        function updateDroneCard(id, data) {
+            const card = document.getElementById(`drone-card-${id}`);
+            if (card) {
+                card.querySelector('.drone-header div:last-child').textContent = `${data.battery}V`;
+                card.querySelector('.drone-header div:last-child').style.color = data.battery < 11.0 ? 'var(--danger)' : 'var(--success)';
+                const values = card.querySelectorAll('.data-value');
+                values[0].textContent = `${data.altitude}m`;
+                values[1].textContent = `R:${data.roll.toFixed(1)} P:${data.pitch.toFixed(1)}`;
+                values[2].textContent = data.latitude.toFixed(5);
+                values[3].textContent = data.longitude.toFixed(5);
+            }
+        }
+
+        function fetchTelemetry() {
+            fetch('/api/telemetry')
+                .then(r => r.json())
+                .then(data => {
+                    const container = document.getElementById('drones-container');
+                    if (Object.keys(data).length > 0 && container.querySelector('p')) {
+                        container.innerHTML = ''; // clear waiting text
+                    }
+
+                    for (const [id, t] of Object.entries(data)) {
+                        // Update UI
+                        if (!document.getElementById(`drone-card-${id}`)) {
+                            container.appendChild(createDroneCard(id, t));
+                        } else {
+                            updateDroneCard(id, t);
+                        }
+
+                        // Update Map
+                        if (!droneMarkers[id]) {
+                            droneMarkers[id] = L.marker([t.latitude, t.longitude]).addTo(map)
+                                .bindPopup(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
+                            if (!mapCentered) {
+                                map.setView([t.latitude, t.longitude], 15);
+                                mapCentered = true;
+                            }
+                        } else {
+                            droneMarkers[id].setLatLng([t.latitude, t.longitude]);
+                            droneMarkers[id].setPopupContent(`<b>Drone ${id}</b><br>Alt: ${t.altitude}m<br>Bat: ${t.battery}V`);
+                        }
+                    }
+                })
+                .catch(err => console.error("Telemetry fetch error:", err));
+        }
+
+        // Poll every 1 seconds
+        setInterval(fetchTelemetry, 1000);
+
+    </script>
+</body>
+</html>

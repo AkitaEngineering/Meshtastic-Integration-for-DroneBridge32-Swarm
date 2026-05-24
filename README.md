@@ -20,44 +20,37 @@ This project provides a comprehensive framework for integrating Meshtastic mesh 
 
 ## Components
 
-1.  **Meshtastic Plugin (Telemetry Reception & Display):**
-    * Python-based plugin for the Meshtastic ground station.
-    * Displays telemetry data, map visualization, and provides control options.
-    * Includes geofencing and data logging.
-2.  **Meshtastic Plugin (Control Command Transmission):**
-    * Python-based plugin for sending control commands.
-    * Supports individual and swarm commands, including emergency landing.
-    * Dynamic Channel switching.
-3.  **DroneBridge32 (or Companion Process) - Telemetry Transmission:**
-    * Arduino code for transmitting telemetry data.
-    * Parses MAVLink messages, encrypts data, and handles fail-safes.
-    * Battery voltage detection.
-4.  **DroneBridge32 (or Companion Process) - Control Command Reception:**
-    * Arduino code for receiving and executing control commands.
-    * Decrypts commands and sends corresponding MAVLink commands.
+1.  **Ground Control Station (Web App):**
+    *   Unified Python Flask backend (`gcs_app.py`) for telemetry and control.
+    *   Premium web frontend with live Leaflet maps and real-time dashboard.
+    *   Includes geofencing checks, data logging, and single-serial connection stability.
+3.  **DroneBridge32 (or Companion Process) - Node Firmware:**
+    *   ESP-IDF (FreeRTOS) C++ application for handling telemetry and control.
+    *   Native multi-tasking (Dedicated tasks for MAVLink parsing, Meshtastic radio, encryption).
+    *   Secure AES-GCM integration and native NVS storage.
 
 ## Installation
 
-1.  **DroneBridge32 Integration:**
-    * Upload the provided Arduino code to your drone's microcontroller.
-    * Ensure MAVLink communication is correctly configured.
+1.  **ESP32 Firmware Integration (ESP-IDF):**
+    *   Install the Espressif IoT Development Framework (ESP-IDF).
+    *   Compile and flash the firmwware using `idf.py build` and `idf.py flash monitor`.
+    *   Ensure MAVLink TX/RX is wired to `Serial2` (Pins 16/17) and Meshtastic to `Serial1` (Pins 4/5).
 2.  **Meshtastic Node:**
     * Connect a Meshtastic-compatible device to your drone.
     * Configure the network settings.
-3.  **Meshtastic Plugin:**
-    * Install Python and required libraries (`pip install meshtastic folium cryptography`).
-    * Run the plugin scripts (`python meshtastic_telemetry.py` and `python meshtastic_control.py`).
+3.  **Ground Control Station:**
+    *   Install Python dependencies: `pip install meshtastic folium cryptography flask`
+    *   Start the server: `python gcs_app.py`
 
 ## Usage
 
-1.  **Launch Plugins:** Start the telemetry and control plugins.
-2.  **Monitor Telemetry:** Observe real-time data on the telemetry plugin.
-3.  **Send Commands:** Use the control plugin to send commands.
-4.  **Map Visualization:** Open the map to view drone locations.
+1.  **Launch Web App:** Run `python gcs_app.py` in your terminal.
+2.  **Open Dashboard:** Navigate to `http://localhost:5000` in your web browser.
+3.  **Monitor & Control:** Observe real-time telemetry on the live map and use the control panels to send commands.
 
 ## Configuration
 
-* **Drone IDs:** Set unique IDs for each drone in the Arduino code.
+* **Drone IDs:** Set unique IDs for each drone in the `main.cpp` code.
 * **MAVLink Settings:** Configure MAVLink baud rate and message IDs.
 * **Meshtastic Settings:** Configure channel, encryption keys, and network settings.
 * **Geofence:** Modify the geofence coordinates in the telemetry plugin.

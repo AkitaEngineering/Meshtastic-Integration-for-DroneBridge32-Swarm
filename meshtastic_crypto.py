@@ -110,9 +110,9 @@ def unpack_control_plaintext(b: bytes):
     return struct.unpack("<IBi", b)
 
 
-def pack_telemetry_plaintext(seq: int, latitude: float, longitude: float, altitude: float, battery: float, drone_id: int) -> bytes:
-    return struct.pack("<IffffB", int(seq), float(latitude), float(longitude), float(altitude), float(battery), int(drone_id))
+def pack_telemetry_plaintext(seq: int, latitude: float, longitude: float, altitude: float, battery: float, roll: float, pitch: float, yaw: float, drone_id: int) -> bytes:
+    return struct.pack("<IfffffffB", int(seq), float(latitude), float(longitude), float(altitude), float(battery), float(roll), float(pitch), float(yaw), int(drone_id))
 
 
 def unpack_telemetry_plaintext(b: bytes):
-    return struct.unpack("<IffffB", b)
+    return struct.unpack("<IfffffffB", b)
