@@ -1,0 +1,4 @@
+cryptography
+flask
+meshtastic
+pyserial

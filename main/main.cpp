@@ -3,7 +3,6 @@
 #include <stdlib.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "freertos/queue.h"
 #include "driver/uart.h"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -11,6 +10,7 @@
 #include "nvs.h"
 #include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
+#include "mbedtls/pk.h"
 
 // Note: To compile, the MAVLink C headers must be available in your include path.
 // If you don't have them in this repository yet, you will need to add them (e.g., in a `components/mavlink` folder).
@@ -35,18 +35,40 @@ static const char *TAG = "DB32_NODE";
 #define MAV_TXD_PIN           (17)
 #define MAV_RXD_PIN           (16)
 
-#define DRONE_ID 1
-#define SYSTEM_ID 255
-#define COMPONENT_ID 1
+#define DRONE_ID                  1
+#define SWARM_BROADCAST_ID        255
+#define GCS_SYSTEM_ID             255
+#define GCS_COMPONENT_ID          1
+#define FC_TARGET_SYSTEM_ID       1
+#define FC_TARGET_COMPONENT_ID    1
+
+#define COMMAND_RTL               1
+#define COMMAND_LAND              2
+#define COMMAND_EMERGENCY_LAND    3
+#define COMMAND_SYNC_REQUEST      4
+
+#define ACK_STATUS_ACCEPTED       1
+#define ACK_STATUS_SYNC           2
+#define ACK_STATUS_REJECTED       3
 
 #define CONTROL_PAYLOAD_LEN 9
+#define CONTROL_ACK_PAYLOAD_LEN 6
 #define TELEMETRY_PAYLOAD_LEN 33
 #define NONCE_LEN 12
 #define TAG_LEN 16
+#define KEY_HEX_LEN 32
+#define MAX_SIGNATURE_LEN 128
 
-static const uint8_t kDefaultKey[] = {0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C};
-static const size_t kKeyLen = sizeof(kDefaultKey);
 static uint8_t runtime_key[16];
+static const size_t kKeyLen = sizeof(runtime_key);
+static bool runtime_key_configured = false;
+
+#ifdef ALLOW_INSECURE_DEFAULT_KEY
+static const uint8_t kDefaultKey[] = {
+    0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6,
+    0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C,
+};
+#endif
 
 static uint32_t last_control_seq = 0;
 static uint32_t telemetry_seq = 0;
@@ -71,23 +93,87 @@ static void fill_random_bytes(uint8_t* buf, size_t len) {
     esp_fill_random(buf, len);
 }
 
+static int hex_nibble(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+static bool hex_to_bytes(const char* hex, uint8_t* out, size_t out_len) {
+    size_t hex_len = strlen(hex);
+    if (hex_len != out_len * 2) {
+        return false;
+    }
+
+    for (size_t i = 0; i < out_len; i++) {
+        int hi = hex_nibble(hex[i * 2]);
+        int lo = hex_nibble(hex[i * 2 + 1]);
+        if (hi < 0 || lo < 0) {
+            return false;
+        }
+        out[i] = (uint8_t)((hi << 4) | lo);
+    }
+    return true;
+}
+
+static bool verify_provisioning_signature(const uint8_t* key, const uint8_t* sig, size_t sig_len) {
+    uint8_t hash[32];
+    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (md_info == NULL || mbedtls_md(md_info, key, kKeyLen, hash) != 0) {
+        ESP_LOGE(TAG, "Failed to hash provisioning key.");
+        return false;
+    }
+
+    mbedtls_pk_context pk;
+    mbedtls_pk_init(&pk);
+    int rc = mbedtls_pk_parse_public_key(
+        &pk,
+        (const unsigned char*)PROVISIONING_PUBKEY_PEM,
+        strlen(PROVISIONING_PUBKEY_PEM) + 1
+    );
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Provisioning public key parse failed: -0x%04x", (unsigned int)-rc);
+        mbedtls_pk_free(&pk);
+        return false;
+    }
+
+    rc = mbedtls_pk_verify(&pk, MBEDTLS_MD_SHA256, hash, sizeof(hash), sig, sig_len);
+    mbedtls_pk_free(&pk);
+    return rc == 0;
+}
+
 // NVS Operations
 static void load_state_from_nvs() {
     nvs_handle_t my_handle;
     esp_err_t err = nvs_open("storage", NVS_READWRITE, &my_handle);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Error (%s) opening NVS handle!", esp_err_to_name(err));
+#ifdef ALLOW_INSECURE_DEFAULT_KEY
         memcpy(runtime_key, kDefaultKey, kKeyLen);
+        runtime_key_configured = true;
+#endif
         return;
     }
 
     size_t required_size = kKeyLen;
     err = nvs_get_blob(my_handle, "aes_key", runtime_key, &required_size);
     if (err != ESP_OK || required_size != kKeyLen) {
-        ESP_LOGI(TAG, "AES Key not found in NVS, using default.");
+        ESP_LOGE(TAG, "AES Key not found in NVS. Provision with SETKEYSIG before use.");
+#ifdef ALLOW_INSECURE_DEFAULT_KEY
+        ESP_LOGW(TAG, "Using insecure compiled default key because ALLOW_INSECURE_DEFAULT_KEY is set.");
         memcpy(runtime_key, kDefaultKey, kKeyLen);
+        runtime_key_configured = true;
+#endif
     } else {
         ESP_LOGI(TAG, "AES Key loaded from NVS.");
+        runtime_key_configured = true;
     }
 
     nvs_get_u32(my_handle, "ctrl_seq", &last_control_seq);
@@ -127,6 +213,9 @@ static void save_telem_seq_to_nvs(uint32_t seq) {
 // AES-GCM Cryptography
 static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, size_t clen, const uint8_t* tag, uint8_t* plaintext) {
     mbedtls_gcm_context gcm;
+    if (!runtime_key_configured) {
+        return false;
+    }
     mbedtls_gcm_init(&gcm);
     if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, runtime_key, kKeyLen * 8) != 0) {
         mbedtls_gcm_free(&gcm);
@@ -139,6 +228,9 @@ static bool aes_gcm_decrypt(const uint8_t* nonce, const uint8_t* ciphertext, siz
 
 static bool aes_gcm_encrypt(const uint8_t* plaintext, size_t plen, const uint8_t* nonce, uint8_t* ciphertext, uint8_t* tag) {
     mbedtls_gcm_context gcm;
+    if (!runtime_key_configured) {
+        return false;
+    }
     mbedtls_gcm_init(&gcm);
     if (mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, runtime_key, kKeyLen * 8) != 0) {
         mbedtls_gcm_free(&gcm);
@@ -155,21 +247,45 @@ static void send_mavlink_command(uint16_t command) {
     uint8_t buf[MAVLINK_MAX_PACKET_LEN];
     mavlink_command_long_t cmd = {0};
 
-    cmd.target_system = SYSTEM_ID;
-    cmd.target_component = COMPONENT_ID;
+    cmd.target_system = FC_TARGET_SYSTEM_ID;
+    cmd.target_component = FC_TARGET_COMPONENT_ID;
     cmd.command = command;
     cmd.confirmation = 0;
     
-    mavlink_msg_command_long_encode(SYSTEM_ID, COMPONENT_ID, &msg, &cmd);
+    mavlink_msg_command_long_encode(GCS_SYSTEM_ID, GCS_COMPONENT_ID, &msg, &cmd);
     uint16_t len = mavlink_msg_to_send_buffer(buf, &msg);
     uart_write_bytes(MAVLINK_UART_NUM, (const char*)buf, len);
+}
+
+static void send_control_ack(uint32_t seq, uint8_t drone_id, uint8_t status) {
+    uint8_t plaintext[CONTROL_ACK_PAYLOAD_LEN];
+    size_t pos = 0;
+    memcpy(plaintext + pos, &seq, sizeof(seq)); pos += sizeof(seq);
+    plaintext[pos++] = drone_id;
+    plaintext[pos] = status;
+
+    uint8_t nonce[NONCE_LEN];
+    uint8_t ciphertext[CONTROL_ACK_PAYLOAD_LEN];
+    uint8_t tag[TAG_LEN];
+    fill_random_bytes(nonce, NONCE_LEN);
+
+    if (aes_gcm_encrypt(plaintext, CONTROL_ACK_PAYLOAD_LEN, nonce, ciphertext, tag)) {
+        uart_write_bytes(MESHTASTIC_UART_NUM, (const char*)nonce, NONCE_LEN);
+        uart_write_bytes(MESHTASTIC_UART_NUM, (const char*)ciphertext, CONTROL_ACK_PAYLOAD_LEN);
+        uart_write_bytes(MESHTASTIC_UART_NUM, (const char*)tag, TAG_LEN);
+    }
 }
 
 // Task: Read MAVLink from Flight Controller
 static void task_mavlink_rx(void *arg) {
     uint8_t* data = (uint8_t*) malloc(UART_RX_BUF_SIZE);
-    mavlink_message_t msg;
-    mavlink_status_t status;
+    if (data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate MAVLink RX buffer.");
+        vTaskDelete(NULL);
+        return;
+    }
+    mavlink_message_t msg = {};
+    mavlink_status_t status = {};
 
     while (1) {
         int len = uart_read_bytes(MAVLINK_UART_NUM, data, UART_RX_BUF_SIZE, 20 / portTICK_PERIOD_MS);
@@ -204,6 +320,11 @@ static void task_mavlink_rx(void *arg) {
 static void task_meshtastic_rx(void *arg) {
     const size_t wire_len = NONCE_LEN + CONTROL_PAYLOAD_LEN + TAG_LEN;
     uint8_t* data = (uint8_t*) malloc(UART_RX_BUF_SIZE);
+    if (data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate Meshtastic RX buffer.");
+        vTaskDelete(NULL);
+        return;
+    }
 
     while (1) {
         int len = uart_read_bytes(MESHTASTIC_UART_NUM, data, wire_len, portMAX_DELAY);
@@ -226,25 +347,40 @@ static void task_meshtastic_rx(void *arg) {
 
                 ESP_LOGI(TAG, "Command Received - Seq: %lu, Drone: %d, Cmd: %ld", (unsigned long)seq, drone_id, (long)command);
 
+                if (drone_id != DRONE_ID && drone_id != SWARM_BROADCAST_ID) {
+                    ESP_LOGI(TAG, "Command is for another drone; ignored without advancing replay counter.");
+                    continue;
+                }
+
                 if (seq > last_control_seq) {
+                    uint8_t ack_status = ACK_STATUS_ACCEPTED;
+
+                    switch (command) {
+                        case COMMAND_RTL:
+                            ESP_LOGI(TAG, "Executing RTL");
+                            send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH);
+                            break;
+                        case COMMAND_LAND:
+                        case COMMAND_EMERGENCY_LAND:
+                            ESP_LOGI(TAG, "Executing Land");
+                            send_mavlink_command(MAV_CMD_NAV_LAND);
+                            break;
+                        case COMMAND_SYNC_REQUEST:
+                            ESP_LOGI(TAG, "Control sync requested");
+                            ack_status = ACK_STATUS_SYNC;
+                            break;
+                        default:
+                            ESP_LOGW(TAG, "Unsupported command rejected: %ld", (long)command);
+                            ack_status = ACK_STATUS_REJECTED;
+                            break;
+                    }
+
                     last_control_seq = seq;
                     save_ctrl_seq_to_nvs(seq);
-                    
-                    if (drone_id == DRONE_ID || drone_id == 255) { // 255 for swarm broadcast
-                        switch (command) {
-                            case 1:
-                                ESP_LOGI(TAG, "Executing RTL");
-                                send_mavlink_command(MAV_CMD_NAV_RETURN_TO_LAUNCH);
-                                break;
-                            case 2:
-                            case 3:
-                                ESP_LOGI(TAG, "Executing Land");
-                                send_mavlink_command(MAV_CMD_NAV_LAND);
-                                break;
-                        }
-                    }
+                    send_control_ack(seq, DRONE_ID, ack_status);
                 } else {
                     ESP_LOGW(TAG, "Stale/Replay control command rejected. Seq: %lu", (unsigned long)seq);
+                    send_control_ack(seq, DRONE_ID, ACK_STATUS_REJECTED);
                 }
             } else {
                 ESP_LOGE(TAG, "Failed to decrypt incoming control packet.");
@@ -297,25 +433,65 @@ static void task_telemetry_tx(void *arg) {
 
 // Task: Read USB Console for Provisioning
 static void task_provisioning(void *arg) {
-    uint8_t* data = (uint8_t*) malloc(UART_RX_BUF_SIZE);
+    uint8_t* data = (uint8_t*) malloc(UART_RX_BUF_SIZE + 1);
+    if (data == NULL) {
+        ESP_LOGE(TAG, "Failed to allocate provisioning buffer.");
+        vTaskDelete(NULL);
+        return;
+    }
     while (1) {
         int len = uart_read_bytes(CONSOLE_UART_NUM, data, UART_RX_BUF_SIZE, 100 / portTICK_PERIOD_MS);
         if (len > 0) {
             data[len] = 0; // null terminate
+            char* signed_ptr = strstr((char*)data, "SETKEYSIG:");
+            if (signed_ptr != NULL) {
+                char key_hex[KEY_HEX_LEN + 1];
+                char sig_hex[MAX_SIGNATURE_LEN * 2 + 1];
+                int matched = sscanf(
+                    signed_ptr,
+                    "SETKEYSIG:%32[0-9a-fA-F]:%256[0-9a-fA-F]",
+                    key_hex,
+                    sig_hex
+                );
+                if (matched == 2) {
+                    uint8_t newkey[16];
+                    uint8_t sig[MAX_SIGNATURE_LEN];
+                    size_t sig_len = strlen(sig_hex) / 2;
+                    if ((strlen(sig_hex) % 2) != 0 || sig_len > MAX_SIGNATURE_LEN ||
+                        !hex_to_bytes(key_hex, newkey, sizeof(newkey)) ||
+                        !hex_to_bytes(sig_hex, sig, sig_len)) {
+                        ESP_LOGE(TAG, "Invalid SETKEYSIG hex payload.");
+                    } else if (verify_provisioning_signature(newkey, sig, sig_len)) {
+                        memcpy(runtime_key, newkey, 16);
+                        runtime_key_configured = true;
+                        save_key_to_nvs(runtime_key, 16);
+                        ESP_LOGI(TAG, "Signed AES key provisioned.");
+                    } else {
+                        ESP_LOGE(TAG, "SETKEYSIG signature verification failed.");
+                    }
+                } else {
+                    ESP_LOGE(TAG, "Invalid SETKEYSIG format. Expected SETKEYSIG:<32hex>:<der_sig_hex>.");
+                }
+            }
+
+#ifdef ALLOW_INSECURE_SETKEY
             char* ptr = strstr((char*)data, "SETKEY:");
             if (ptr != NULL) {
                 char hex[33];
                 if (sscanf(ptr, "SETKEY:%32s", hex) == 1 && strlen(hex) == 32) {
                     uint8_t newkey[16];
-                    for (int i = 0; i < 16; i++) {
-                        sscanf(&hex[i*2], "%2hhx", &newkey[i]);
+                    if (hex_to_bytes(hex, newkey, sizeof(newkey))) {
+                        memcpy(runtime_key, newkey, 16);
+                        runtime_key_configured = true;
+                        save_key_to_nvs(runtime_key, 16);
+                    } else {
+                        ESP_LOGE(TAG, "Invalid SETKEY hex.");
                     }
-                    memcpy(runtime_key, newkey, 16);
-                    save_key_to_nvs(runtime_key, 16);
                 } else {
                     ESP_LOGE(TAG, "Invalid SETKEY format. Expected 32 hex chars.");
                 }
             }
+#endif
         }
         vTaskDelay(pdMS_TO_TICKS(500));
     }

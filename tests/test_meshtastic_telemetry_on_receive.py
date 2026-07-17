@@ -1,5 +1,4 @@
 import os
-import struct
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
 import meshtastic_telemetry as mt
@@ -18,6 +17,10 @@ def make_telemetry_wire(seq, lat, lon, alt, bat, drone_id):
 
 def make_packet(portnum, wire):
     return {"decoded": {"data": {"portnum": portnum, "payload": wire}}}
+
+
+class EnumLikePort:
+    value = mt.DRONE_TELEMETRY_DATA_TYPE
 
 
 def test_on_receive_accepts_and_rejects_stale():
@@ -39,3 +42,12 @@ def test_on_receive_accepts_and_rejects_stale():
     mt.on_receive(pkt2, None)
     assert mt.last_telemetry_seq.get(5) == 2
     assert mt.drone_data[5]["latitude"] == 1.1
+
+
+def test_on_receive_accepts_enum_like_portnum():
+    wire = make_telemetry_wire(3, 1.0, 2.0, 3.0, 11.1, 8)
+    pkt = make_packet(EnumLikePort(), wire)
+
+    mt.on_receive(pkt, None)
+
+    assert mt.last_telemetry_seq.get(8) == 3

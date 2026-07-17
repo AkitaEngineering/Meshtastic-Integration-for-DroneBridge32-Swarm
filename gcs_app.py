@@ -1,105 +1,113 @@
-import time
-import struct
-import json
+import hmac
 import os
 import threading
 from flask import Flask, render_template, request, jsonify
 import meshtastic
 import meshtastic.serial_interface
-try:
-    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
-except ImportError:
-    AESGCM = None
 
-from meshtastic_crypto import load_key, next_seq, pack_control_plaintext, unpack_telemetry_plaintext
+import meshtastic_control
+import meshtastic_telemetry
 
 app = Flask(__name__)
 
-# Config
-DEFAULT_KEY = bytes([0x2B, 0x7E, 0x15, 0x16, 0x28, 0xAE, 0xD2, 0xA6, 0xAB, 0xF7, 0x15, 0x88, 0x09, 0xCF, 0x4F, 0x3C])
-KEY = load_key(DEFAULT_KEY)
-DRONE_TELEMETRY_DATA_TYPE = 100
-DRONE_CONTROL_COMMAND_DATA_TYPE = 101
-
 interface = None
-drone_data = {}
-last_telemetry_seq = {}
+
+
+def _configured_api_token():
+    return os.environ.get("MESHTASTIC_API_TOKEN")
+
+
+def _control_authorized():
+    token = _configured_api_token()
+    if not token:
+        return True
+
+    auth_header = request.headers.get("Authorization", "")
+    if auth_header.startswith("Bearer "):
+        supplied = auth_header.removeprefix("Bearer ").strip()
+    else:
+        supplied = request.headers.get("X-API-Token", "")
+
+    return hmac.compare_digest(supplied, token)
+
 
 def on_receive(packet, interface):
-    if not packet.get('decoded') or not packet['decoded'].get('data'):
-        return
-    portnum = packet['decoded']['data'].get('portnum')
-    payload = packet['decoded']['data'].get('payload')
-    
-    if portnum == DRONE_TELEMETRY_DATA_TYPE:
-        if AESGCM is None or len(payload) < 28:
-            return
-        nonce = payload[:12]
-        ciphertext = payload[12:]
-        try:
-            plaintext = AESGCM(KEY).decrypt(nonce, ciphertext, None)
-            seq, lat, lon, alt, bat, roll, pitch, yaw, drone_id = unpack_telemetry_plaintext(plaintext)
-            last = last_telemetry_seq.get(drone_id, 0)
-            if seq <= last:
-                return
-            last_telemetry_seq[drone_id] = seq
-            drone_data[drone_id] = {
-                "latitude": round(lat, 6),
-                "longitude": round(lon, 6),
-                "altitude": round(alt, 3),
-                "battery": round(bat, 2),
-                "roll": round(roll, 3),
-                "pitch": round(pitch, 3),
-                "yaw": round(yaw, 3),
-                "last_seen": time.time()
-            }
-        except Exception as e:
-            print(f"Decryption failed: {e}")
+    meshtastic_telemetry.on_receive(packet, interface)
+    meshtastic_control._on_receive_control(packet, interface)
+
 
 @app.route("/")
 def index():
     return render_template("index.html")
 
+
 @app.route("/api/telemetry")
 def get_telemetry():
-    return jsonify(drone_data)
+    return jsonify(meshtastic_telemetry.drone_data)
+
 
 @app.route("/api/control", methods=["POST"])
 def send_command():
-    data = request.json
-    drone_id = data.get("drone_id", 0)
-    command = data.get("command", 0)
-    
+    data = request.get_json(silent=True) or {}
+
+    if not _control_authorized():
+        return jsonify({"error": "unauthorized"}), 401
+
     if interface is None:
         return jsonify({"error": "Meshtastic not connected"}), 500
+
     try:
-        seq = next_seq()
-        payload = pack_control_plaintext(seq, int(drone_id), int(command))
-        if AESGCM is None:
-            return jsonify({"error": "Cryptography missing"}), 500
-            
-        aesgcm = AESGCM(KEY)
-        nonce = os.urandom(12)
-        ciphertext = aesgcm.encrypt(nonce, payload, None)
-        wire = nonce + ciphertext
-        interface.sendData(wire, DRONE_CONTROL_COMMAND_DATA_TYPE)
-        return jsonify({"success": True})
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        drone_id = int(data.get("drone_id", 0))
+        command = int(data.get("command", 0))
+    except (TypeError, ValueError):
+        return jsonify({"error": "drone_id and command must be integers"}), 400
+
+    if not 0 <= drone_id <= 255:
+        return jsonify({"error": "drone_id must be between 0 and 255"}), 400
+    allowed_commands = {
+        meshtastic_control.COMMAND_RTL,
+        meshtastic_control.COMMAND_LAND,
+        meshtastic_control.COMMAND_EMERGENCY_LAND,
+        meshtastic_control.COMMAND_SYNC_REQUEST,
+    }
+    if command not in allowed_commands:
+        return jsonify({"error": "unsupported command"}), 400
+
+    try:
+        seq = meshtastic_control.send_control_command(drone_id, command)
+    except Exception as exc:
+        return jsonify({"error": str(exc)}), 500
+
+    return jsonify({"success": True, "seq": seq})
+
 
 def meshtastic_thread():
     global interface
     try:
         # Running in a background thread
-        interface = meshtastic.serial_interface.SerialInterface()
+        if os.environ.get("MESHTASTIC_FAKE") == "1":
+            from qa_simulator import SimulatedMeshtasticInterface
+
+            interval = float(os.environ.get("MESHTASTIC_FAKE_INTERVAL", "1.0"))
+            drone_id = int(os.environ.get("MESHTASTIC_FAKE_DRONE_ID", "1"))
+            interface = SimulatedMeshtasticInterface(drone_id, interval)
+        else:
+            interface = meshtastic.serial_interface.SerialInterface()
+
+        meshtastic_control.interface = interface
         try:
             interface.onReceive += on_receive
         except Exception:
-            pass # Fallback pubsub if needed
-    except Exception as e:
-        print(f"Meshtastic interface failed: {e}")
+            pass  # Fallback pubsub if needed.
+        if hasattr(interface, "start"):
+            interface.start()
+    except Exception as exc:
+        print(f"Meshtastic interface failed: {exc}")
+
 
 if __name__ == "__main__":
     t = threading.Thread(target=meshtastic_thread, daemon=True)
     t.start()
-    app.run(host="0.0.0.0", port=5000, debug=False)
+    host = os.environ.get("MESHTASTIC_GCS_HOST", "127.0.0.1")
+    port = int(os.environ.get("MESHTASTIC_GCS_PORT", "5000"))
+    app.run(host=host, port=port, debug=False)

@@ -1,0 +1,7 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+.control_seq
+drone_telemetry.jsonl
+scripts/provisioning_private.pem

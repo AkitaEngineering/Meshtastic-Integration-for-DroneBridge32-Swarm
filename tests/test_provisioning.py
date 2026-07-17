@@ -1,6 +1,7 @@
 import re
-from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives import hashes
 from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.hazmat.primitives.serialization import load_pem_public_key
 
 
 def test_generated_setkeysig_roundtrip():
@@ -32,3 +33,8 @@ def test_header_matches_script_pem():
     script_pem = '\n'.join([line.strip() for line in script_pem.strip().splitlines()]) + '\n'
 
     assert pem_like == script_pem
+
+
+def test_script_public_pem_is_valid():
+    script_pem = open("scripts/provisioning_public.pem", "rb").read()
+    load_pem_public_key(script_pem)
